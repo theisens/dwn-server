@@ -1,16 +1,30 @@
-import type { Dwn, GenericMessage, MessageEvent } from "@tbd54566975/dwn-sdk-js";
+import type {
+  Dwn,
+  GenericMessage,
+  MessageEvent
+} from "@tbd54566975/dwn-sdk-js";
 import { DwnMethodName } from "@tbd54566975/dwn-sdk-js";
 
 import type { WebSocket } from "ws";
-import log from 'loglevel';
-import { v4 as uuidv4 } from 'uuid';
+import log from "loglevel";
+import { v4 as uuidv4 } from "uuid";
 
 import type { RequestContext } from "../lib/json-rpc-router.js";
-import type { JsonRpcErrorResponse, JsonRpcId, JsonRpcRequest, JsonRpcResponse, JsonRpcSubscription } from "../lib/json-rpc.js";
+import type {
+  JsonRpcErrorResponse,
+  JsonRpcId,
+  JsonRpcRequest,
+  JsonRpcResponse,
+  JsonRpcSubscription
+} from "../lib/json-rpc.js";
 
 import { requestCounter } from "../metrics.js";
 import { jsonRpcRouter } from "../json-rpc-api.js";
-import { JsonRpcErrorCodes, createJsonRpcErrorResponse, createJsonRpcSuccessResponse } from "../lib/json-rpc.js";
+import {
+  JsonRpcErrorCodes,
+  createJsonRpcErrorResponse,
+  createJsonRpcSuccessResponse
+} from "../lib/json-rpc.js";
 import { DwnServerError, DwnServerErrorCode } from "../dwn-error.js";
 
 const HEARTBEAT_INTERVAL = 30_000;
@@ -28,11 +42,11 @@ export class SocketConnection {
     private socket: WebSocket,
     private dwn: Dwn,
     private onClose?: () => void
-  ){
-    socket.on('message', this.message.bind(this));
-    socket.on('close', this.close.bind(this));
-    socket.on('error', this.error.bind(this));
-    socket.on('pong', this.pong.bind(this));
+  ) {
+    socket.on("message", this.message.bind(this));
+    socket.on("close", this.close.bind(this));
+    socket.on("error", this.error.bind(this));
+    socket.on("pong", this.pong.bind(this));
 
     // Sometimes connections between client <-> server can get borked in such a way that
     // leaves both unaware of the borkage. ping messages can be used as a means to verify
@@ -65,7 +79,7 @@ export class SocketConnection {
       throw new DwnServerError(
         DwnServerErrorCode.ConnectionSubscriptionJsonRpcIdExists,
         `the subscription with id ${subscription.id} already exists`
-      )
+      );
     }
 
     this.subscriptions.set(subscription.id, subscription);
@@ -81,7 +95,7 @@ export class SocketConnection {
       throw new DwnServerError(
         DwnServerErrorCode.ConnectionSubscriptionJsonRpcIdNotFound,
         `the subscription with id ${id} was not found`
-      )
+      );
     }
 
     const connection = this.subscriptions.get(id);
@@ -93,7 +107,7 @@ export class SocketConnection {
    * Closes the existing connection and cleans up any listeners or subscriptions.
    */
   async close(): Promise<void> {
-    clearInterval(this.heartbeatInterval);
+    clearInterval(this.heartbeatInterval as NodeJS.Timeout);
 
     // clean up all socket event listeners
     this.socket.removeAllListeners();
@@ -127,7 +141,7 @@ export class SocketConnection {
   /**
    * Log the error and close the connection.
    */
-  private async error(error:Error): Promise<void>{
+  private async error(error: Error): Promise<void> {
     log.error(`SocketConnection error, terminating connection`, error);
     this.socket.terminate();
     await this.close();
@@ -139,33 +153,38 @@ export class SocketConnection {
   private async message(dataBuffer: Buffer): Promise<void> {
     const requestData = dataBuffer.toString();
     if (!requestData) {
-      return this.send(createJsonRpcErrorResponse(
-        uuidv4(),
-        JsonRpcErrorCodes.BadRequest,
-        'request payload required.'
-      ))
+      return this.send(
+        createJsonRpcErrorResponse(
+          uuidv4(),
+          JsonRpcErrorCodes.BadRequest,
+          "request payload required."
+        )
+      );
     }
 
     let jsonRequest: JsonRpcRequest;
     try {
       jsonRequest = JSON.parse(requestData);
-    } catch(error) {
+    } catch (error) {
       const errorResponse = createJsonRpcErrorResponse(
         uuidv4(),
         JsonRpcErrorCodes.BadRequest,
         (error as Error).message
       );
       return this.send(errorResponse);
-    };
+    }
 
     const requestContext = await this.buildRequestContext(jsonRequest);
-    const { jsonRpcResponse } = await jsonRpcRouter.handle(jsonRequest, requestContext);
+    const { jsonRpcResponse } = await jsonRpcRouter.handle(
+      jsonRequest,
+      requestContext
+    );
     if (jsonRpcResponse.error) {
       requestCounter.inc({ method: jsonRequest.method, error: 1 });
     } else {
       requestCounter.inc({
         method: jsonRequest.method,
-        status: jsonRpcResponse?.result?.reply?.status?.code || 0,
+        status: jsonRpcResponse?.result?.reply?.status?.code || 0
       });
     }
     this.send(jsonRpcResponse);
@@ -183,11 +202,13 @@ export class SocketConnection {
    *
    * Wraps the incoming `message` in a `JSON RPC Success Response` using the original subscription`JSON RPC Id` to send through the WebSocket.
    */
-  private createSubscriptionHandler(id: JsonRpcId): (message: MessageEvent) => void {
+  private createSubscriptionHandler(
+    id: JsonRpcId
+  ): (message: MessageEvent) => void {
     return (event) => {
       const response = createJsonRpcSuccessResponse(id, { event });
       this.send(response);
-    }
+    };
   }
 
   /**
@@ -195,24 +216,26 @@ export class SocketConnection {
    *
    * Adds a `subscriptionHandler` for `Subscribe` messages.
    */
-  private async buildRequestContext(request: JsonRpcRequest): Promise<RequestContext> {
+  private async buildRequestContext(
+    request: JsonRpcRequest
+  ): Promise<RequestContext> {
     const { params, method, subscription } = request;
 
     const requestContext: RequestContext = {
-      transport        : 'ws',
-      dwn              : this.dwn,
-      socketConnection : this,
-    }
+      transport: "ws",
+      dwn: this.dwn,
+      socketConnection: this
+    };
 
     // methods that expect a long-running subscription begin with `rpc.subscribe.`
-    if (method.startsWith('rpc.subscribe.') && subscription) {
+    if (method.startsWith("rpc.subscribe.") && subscription) {
       const { message } = params as { message?: GenericMessage };
       if (message?.descriptor.method === DwnMethodName.Subscribe) {
         const handlerFunc = this.createSubscriptionHandler(subscription.id);
         requestContext.subscriptionRequest = {
           id: subscription.id,
-          subscriptionHandler: (message): void => handlerFunc(message),
-        }
+          subscriptionHandler: (message): void => handlerFunc(message)
+        };
       }
     }
 
