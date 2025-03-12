@@ -1,7 +1,7 @@
 {
-  "name": "@web5/dwn-server",
+  "name": "fork-vp-dwn-server",
   "type": "module",
-  "version": "0.6.1",
+  "version": "1.0.0",
   "files": [
     "dist",
     "src"
