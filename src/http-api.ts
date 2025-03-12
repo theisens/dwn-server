@@ -32,6 +32,7 @@ import {
 } from "./lib/json-rpc.js";
 import { requestCounter, responseHistogram } from "./metrics.js";
 import { Convert } from "@web5/common";
+import { Readable } from "stream";
 
 export class HttpApi {
   #config: DwnServerConfig;
@@ -409,8 +410,8 @@ export class HttpApi {
       log.info(`Hit endpoint '/'`);
 
       let requestPayload: {
-        requests?: JsonRpcRequest[];
-        data?: string | string[];
+        requests: JsonRpcRequest[];
+        data?: string[];
       };
 
       try {
@@ -425,16 +426,16 @@ export class HttpApi {
           );
         }
 
-        // TODO: If it's a batch request, ensure data (if present) is an array
-        // if (
-        //   isBatchRequest &&
-        //   requestPayload.data &&
-        //   !Array.isArray(requestPayload.data)
-        // ) {
-        //   throw new Error(
-        //     "Invalid request format: 'data' must be an array when using 'requests'."
-        //   );
-        // }
+        // Validate that 'data' is an array
+        if (
+          Array.isArray(requestPayload.requests) &&
+          requestPayload.data &&
+          !Array.isArray(requestPayload.data)
+        ) {
+          throw new Error(
+            "Invalid request format: 'data' must be an array when provided."
+          );
+        }
       } catch (e) {
         return res.status(400).json({
           jsonrpc: "2.0",
@@ -447,15 +448,41 @@ export class HttpApi {
         transport: "http"
       };
 
+      // If only one piece of data provided, use this value for all messages
+      // let rawData: string | undefined = undefined;
+      // if (requestPayload.data?.length === 1) {
+      //   log.info("Using one value for data");
+      //   rawData = requestPayload.data[0];
+      // }
+
       // **Batch Request Handling**
-      // TODO: handling of data for requests that require data
-      // !! Needs to be updated
       const responses = await Promise.all(
         requestPayload.requests.map((request, index) => {
-          const requestData = requestPayload.data
-            ? requestPayload.data[index]
-            : undefined;
-          const extendedContext = { ...requestContext, data: requestData };
+          // Extract raw data for this request, if applicable
+          let rawData: string | undefined = undefined;
+          if (requestPayload.data.length === 0) {
+            log.info("No data for message");
+          } else if (requestPayload.data?.length === 1) {
+            log.info("Using one value for data");
+            rawData = requestPayload.data[0];
+          } else {
+            rawData = requestPayload.data[index];
+          }
+
+          log.info(`rawData: ${JSON.stringify(rawData)}`);
+
+          let dataStream: Readable | undefined = undefined;
+
+          if (rawData && request.method === "dwn.processMessage") {
+            dataStream = new Readable();
+            dataStream.push(rawData);
+            dataStream.push(null);
+          }
+
+          const extendedContext: RequestContext = {
+            ...requestContext,
+            dataStream
+          };
           return jsonRpcRouter.handle(request, extendedContext);
         })
       );
