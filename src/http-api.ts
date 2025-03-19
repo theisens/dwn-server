@@ -439,7 +439,7 @@ export class HttpApi {
       } catch (e) {
         return res.status(400).json({
           jsonrpc: "2.0",
-          error: { code: -32600, message: "Invalid JSON-RPC format." }
+          error: { code: -32600, message: e.message }
         });
       }
 
