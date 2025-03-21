@@ -337,110 +337,99 @@ export class HttpApi {
       );
     });
 
-    // !! TBD OLD IMPLEMENTATION - REMOVE WHEN FINISHED
-    // this.#api.post("/", async (req: Request, res) => {
-    //   const dwnRpcRequestString = req.headers["dwn-request"] as string;
-
-    //   if (!dwnRpcRequestString) {
-    //     const reply = createJsonRpcErrorResponse(
-    //       uuidv4(),
-    //       JsonRpcErrorCodes.BadRequest,
-    //       "request payload required."
-    //     );
-
-    //     return res.status(400).json(reply);
-    //   }
-
-    //   let dwnRpcRequest: JsonRpcRequest;
-    //   try {
-    //     dwnRpcRequest = JSON.parse(dwnRpcRequestString);
-    //   } catch (e) {
-    //     const reply = createJsonRpcErrorResponse(
-    //       uuidv4(),
-    //       JsonRpcErrorCodes.BadRequest,
-    //       e.message
-    //     );
-
-    //     return res.status(400).json(reply);
-    //   }
-
-    //   // Check whether data was provided in the request body
-    //   const contentLength = req.headers["content-length"];
-    //   const transferEncoding = req.headers["transfer-encoding"];
-    //   const requestDataStream =
-    //     parseInt(contentLength) > 0 || transferEncoding !== undefined
-    //       ? req
-    //       : undefined;
-
-    //   const requestContext: RequestContext = {
-    //     dwn: this.dwn,
-    //     transport: "http",
-    //     dataStream: requestDataStream
-    //   };
-
-    //   // console.log(`request context: ${JSON.stringify(requestContext)}`);
-    //   const { jsonRpcResponse, dataStream: responseDataStream } =
-    //     await jsonRpcRouter.handle(
-    //       dwnRpcRequest,
-    //       requestContext as RequestContext
-    //     );
-
-    //   // If the handler catches a thrown exception and returns a JSON RPC InternalError, return the equivalent
-    //   // HTTP 500 Internal Server Error with the response.
-    //   if (jsonRpcResponse.error) {
-    //     requestCounter.inc({ method: dwnRpcRequest.method, error: 1 });
-    //     return res.status(500).json(jsonRpcResponse);
-    //   }
-
-    //   requestCounter.inc({
-    //     method: dwnRpcRequest.method,
-    //     status: jsonRpcResponse?.result?.reply?.status?.code || 0
-    //   });
-    //   if (responseDataStream) {
-    //     res.setHeader("content-type", "application/octet-stream");
-    //     res.setHeader("dwn-response", JSON.stringify(jsonRpcResponse));
-
-    //     return responseDataStream.pipe(res);
-    //   } else {
-    //     return res.json(jsonRpcResponse);
-    //   }
-    // });
-
     this.#api.post("/", async (req: Request, res) => {
       log.info(`Hit endpoint '/'`);
 
-      let requestPayload: {
-        requests: JsonRpcRequest[];
-        data?: string[];
-      };
+      let requestPayload;
+      let binaryDataBuffer = [];
+      let isParsingMetadata = true;
+      let metadataBuffer = [];
 
+      // Read entire request stream
+      for await (const chunk of req) {
+        if (isParsingMetadata) {
+          const separatorIndex = chunk.indexOf(0);
+          if (separatorIndex !== -1) {
+            metadataBuffer.push(chunk.slice(0, separatorIndex)); // JSON metadata
+            binaryDataBuffer.push(chunk.slice(separatorIndex + 1)); // Start of binary data
+            isParsingMetadata = false;
+          } else {
+            metadataBuffer.push(chunk);
+          }
+        } else {
+          binaryDataBuffer.push(chunk);
+        }
+      }
+
+      // Parse JSON metadata
       try {
-        log.info(`Req.body: ${JSON.stringify(req.body)}`);
-        requestPayload = req.body;
-
-        log.info(`Request payload: ${JSON.stringify(requestPayload)}`);
-
-        if (!requestPayload.requests) {
-          throw new Error(
-            "Invalid request format: Must contain 'requests' field."
-          );
-        }
-
-        // Validate that 'data' is an array
-        if (
-          Array.isArray(requestPayload.requests) &&
-          requestPayload.data &&
-          !Array.isArray(requestPayload.data)
-        ) {
-          throw new Error(
-            "Invalid request format: 'data' must be an array when provided."
-          );
-        }
+        requestPayload = JSON.parse(Buffer.concat(metadataBuffer).toString());
       } catch (e) {
         return res.status(400).json({
           jsonrpc: "2.0",
-          error: { code: -32600, message: e.message }
+          error: {
+            code: -32600,
+            message: "Invalid JSON format in request to DWN server"
+          }
         });
+      }
+
+      if (!requestPayload.requests) {
+        return res.status(400).json({
+          jsonrpc: "2.0",
+          error: {
+            code: -32600,
+            message: "Missing requests field in payload sent to DWN server"
+          }
+        });
+      }
+
+      const binaryBuffer = Buffer.concat(binaryDataBuffer);
+      let offset = 0;
+      let extractedData = [];
+
+      while (offset < binaryBuffer.length) {
+        if (offset + 4 > binaryBuffer.length) {
+          log.error(
+            `Corrupt binary data: Expected 4-byte length at offset ${offset}, but only ${
+              binaryBuffer.length - offset
+            } bytes left.`
+          );
+
+          break;
+        }
+
+        // Read the 4-byte length prefix
+        const dataLength = binaryBuffer.readUInt32LE(offset);
+        offset += 4;
+
+        if (offset + dataLength > binaryBuffer.length) {
+          log.error(
+            `Corrupt binary data: Data length ${dataLength} at offset ${offset} exceeds buffer size ${binaryBuffer.length}`
+          );
+          break;
+        }
+
+        // Extract the corresponding binary data
+        const dataChunk = binaryBuffer.subarray(offset, offset + dataLength);
+        extractedData.push(dataChunk);
+        offset += dataLength;
+      }
+
+      // Remove empty buffers
+      binaryDataBuffer = binaryDataBuffer.filter((buf) => buf.length > 0);
+
+      // Determine if this batch actually included binary data
+      const isWriteBatch =
+        binaryDataBuffer.length > 0 || extractedData.length > 0;
+
+      if (
+        isWriteBatch &&
+        extractedData.length !== requestPayload.requests.length
+      ) {
+        log.error(
+          `Mismatch: ${extractedData.length} data chunks extracted, but ${requestPayload.requests.length} requests found.`
+        );
       }
 
       const requestContext: RequestContext = {
@@ -448,34 +437,14 @@ export class HttpApi {
         transport: "http"
       };
 
-      // If only one piece of data provided, use this value for all messages
-      // let rawData: string | undefined = undefined;
-      // if (requestPayload.data?.length === 1) {
-      //   log.info("Using one value for data");
-      //   rawData = requestPayload.data[0];
-      // }
-
-      // **Batch Request Handling**
+      // Process requests with corresponding extracted binary data
       const responses = await Promise.all(
         requestPayload.requests.map((request, index) => {
-          // Extract raw data for this request, if applicable
-          let rawData: string | undefined = undefined;
-          if (requestPayload.data.length === 0) {
-            log.info("No data for message");
-          } else if (requestPayload.data?.length === 1) {
-            log.info("Using one value for data");
-            rawData = requestPayload.data[0];
-          } else {
-            rawData = requestPayload.data[index];
-          }
-
-          log.info(`rawData: ${JSON.stringify(rawData)}`);
-
           let dataStream: Readable | undefined = undefined;
 
-          if (rawData && request.method === "dwn.processMessage") {
+          if (extractedData[index] && request.method === "dwn.processMessage") {
             dataStream = new Readable();
-            dataStream.push(rawData);
+            dataStream.push(extractedData[index]);
             dataStream.push(null);
           }
 
@@ -483,6 +452,7 @@ export class HttpApi {
             ...requestContext,
             dataStream
           };
+
           return jsonRpcRouter.handle(request, extendedContext);
         })
       );
